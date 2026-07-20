@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import streamlit as st
@@ -35,6 +36,19 @@ def save_uploads(uploaded_files: list) -> None:
         (DATA_DIR / safe_name).write_bytes(uploaded.getbuffer())
 
 
+def get_streamlit_secret(*names: str) -> str:
+    """Lee un secreto de Streamlit sin exigir un archivo local de secretos."""
+    try:
+        for name in names:
+            value = st.secrets.get(name, "")
+            if value and str(value).strip():
+                return str(value).strip()
+    except Exception:
+        # En ejecución local es normal que secrets.toml no exista.
+        return ""
+    return ""
+
+
 try:
     settings = Settings.from_env()
     settings_error = ""
@@ -43,15 +57,41 @@ except ValueError as exc:
     settings_error = str(exc)
 
 credentials_error = ""
-if settings:
-    try:
-        settings.validate_credentials()
-    except ValueError as exc:
-        credentials_error = str(exc)
+
+if settings and settings.provider == "openai" and not settings.openai_api_key:
+    deployed_api_key = get_streamlit_secret("OPENAI_API_KEY", "openai_api_key")
+    if deployed_api_key:
+        settings = replace(settings, openai_api_key=deployed_api_key)
 
 with st.sidebar:
     st.subheader("Base de conocimiento", help="Manuales utilizados por el asistente RAG.")
     st.caption(f"Carpeta: {DATA_DIR}")
+
+    if settings and settings.provider == "openai" and not settings.openai_api_key:
+        session_api_key = st.text_input(
+            "Clave de OpenAI para esta sesión",
+            type="password",
+            key="openai_api_key_session",
+            icon=":material/key:",
+            placeholder="sk-...",
+            help=(
+                "La clave permanece solamente en esta sesión del navegador; "
+                "no se escribe en el proyecto ni se envía a Git."
+            ),
+            persist_state="session",
+        )
+        if session_api_key and session_api_key.strip():
+            settings = replace(
+                settings,
+                openai_api_key=session_api_key.strip(),
+            )
+
+    if settings:
+        try:
+            settings.validate_credentials()
+        except ValueError as exc:
+            credentials_error = str(exc)
+
     uploaded_files = []
     if settings and settings.allow_pdf_upload:
         uploaded_files = st.file_uploader(
@@ -82,9 +122,7 @@ with st.sidebar:
     if credentials_error:
         st.warning(credentials_error, icon=":material/key:")
 
-    can_process = bool(
-        pdf_paths and settings and not settings_error and not credentials_error
-    )
+    can_process = bool(settings and not settings_error and not credentials_error)
     process_clicked = st.button(
         "Procesar documentos",
         type="primary",
@@ -140,7 +178,7 @@ for message in st.session_state.messages:
 ready = "rag_index" in st.session_state and "provider" in st.session_state
 question = st.chat_input(
     "Ejemplo: ¿Qué debo hacer durante mi primer día?",
-    disabled=not ready,
+    disabled=False,
     submit_mode="disable",
 )
 if question:
@@ -148,35 +186,59 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
-    with st.chat_message("assistant"):
-        try:
-            with st.spinner("Buscando en los manuales..."):
-                response, results = answer_question(
-                    question,
-                    st.session_state.rag_index,
-                    st.session_state.provider,
-                    settings.top_k,
-                )
-            st.markdown(response)
-            sources = [
-                {
-                    "number": number,
-                    "file": result.chunk.source,
-                    "page": result.chunk.page,
-                    "score": result.score,
-                    "text": result.chunk.text,
-                }
-                for number, result in enumerate(results, start=1)
-            ]
-            with st.expander("Fuentes consultadas"):
-                for source in sources:
-                    st.markdown(
-                        f"**[F{source['number']}] {source['file']} — página "
-                        f"{source['page']}** · similitud {source['score']:.3f}"
-                    )
-                    st.caption(source["text"])
-            st.session_state.messages.append(
-                {"role": "assistant", "content": response, "sources": sources}
+    if not ready:
+        if settings_error:
+            guidance = f"Revise la configuración de la aplicación: {settings_error}"
+        elif credentials_error:
+            guidance = (
+                "Configure la clave de OpenAI en los secretos del despliegue o "
+                "en el campo de contraseña del panel lateral."
             )
-        except Exception as exc:
-            st.error(f"No se pudo responder: {exc}")
+        elif not pdf_paths:
+            guidance = (
+                "Aún no hay documentos PDF disponibles. Cargue los manuales desde "
+                "el panel lateral o móntelos en la carpeta `data/` del servidor."
+            )
+        else:
+            guidance = (
+                "La base todavía no fue indexada. Pulse **Procesar documentos** "
+                "y, cuando termine, vuelva a enviar la pregunta."
+            )
+        with st.chat_message("assistant"):
+            st.info(guidance, icon=":material/info:")
+        st.session_state.messages.append(
+            {"role": "assistant", "content": guidance}
+        )
+    else:
+        with st.chat_message("assistant"):
+            try:
+                with st.spinner("Buscando en los manuales..."):
+                    response, results = answer_question(
+                        question,
+                        st.session_state.rag_index,
+                        st.session_state.provider,
+                        settings.top_k,
+                    )
+                st.markdown(response)
+                sources = [
+                    {
+                        "number": number,
+                        "file": result.chunk.source,
+                        "page": result.chunk.page,
+                        "score": result.score,
+                        "text": result.chunk.text,
+                    }
+                    for number, result in enumerate(results, start=1)
+                ]
+                with st.expander("Fuentes consultadas"):
+                    for source in sources:
+                        st.markdown(
+                            f"**[F{source['number']}] {source['file']} — página "
+                            f"{source['page']}** · similitud {source['score']:.3f}"
+                        )
+                        st.caption(source["text"])
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": response, "sources": sources}
+                )
+            except Exception as exc:
+                st.error(f"No se pudo responder: {exc}")
