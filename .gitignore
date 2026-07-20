@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.streamlit/secrets.toml
+data/*.pdf
+data/index_*.json
+data/index_*.npz
+!data/.gitkeep
+
