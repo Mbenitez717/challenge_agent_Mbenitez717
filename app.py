@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import logging
 from pathlib import Path
 
 import streamlit as st
 
-from src.config import DATA_DIR, EXPECTED_PDFS, Settings
-from src.providers import create_provider
-from src.rag import answer_question, build_or_load_index, discover_pdfs
+from src.config import EXPECTED_PDFS, Settings
+from src.providers import AIProvider, create_provider
+from src.rag import VectorIndex, answer_question, build_or_load_index, discover_pdfs
 
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Santos Pegasus | Asistente RAG",
@@ -28,217 +31,116 @@ with st.container(border=True):
     )
 
 
-def save_uploads(uploaded_files: list) -> None:
-    for uploaded in uploaded_files:
-        safe_name = Path(uploaded.name).name
-        if not safe_name.lower().endswith(".pdf"):
-            continue
-        (DATA_DIR / safe_name).write_bytes(uploaded.getbuffer())
+def friendly_index_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "connection" in message or "conexión" in message:
+        return "El servicio local de inteligencia artificial no está disponible."
+    if "404" in message or "not found" in message:
+        return "Los modelos configurados todavía no están disponibles en el servidor."
+    if "no hay archivos pdf" in message:
+        return "Los manuales requeridos no están instalados en el servidor."
+    return "No se pudo preparar la base de conocimiento."
 
 
-def get_streamlit_secret(*names: str) -> str:
-    """Lee un secreto de Streamlit sin exigir un archivo local de secretos."""
-    try:
-        for name in names:
-            value = st.secrets.get(name, "")
-            if value and str(value).strip():
-                return str(value).strip()
-    except Exception:
-        # En ejecución local es normal que secrets.toml no exista.
-        return ""
-    return ""
+def document_signature(pdf_paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    return tuple(
+        (str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns)
+        for path in pdf_paths
+    )
 
 
-try:
-    settings = Settings.from_env()
-    settings_error = ""
-except ValueError as exc:
-    settings = None
-    settings_error = str(exc)
+@st.cache_resource(show_spinner=False, max_entries=2)
+def load_rag_runtime(
+    settings: Settings,
+    signature: tuple[tuple[str, int, int], ...],
+) -> tuple[VectorIndex, AIProvider]:
+    # La firma invalida la caché automáticamente si cambia un manual.
+    del signature
+    provider = create_provider(settings)
+    index = build_or_load_index(discover_pdfs(), settings, provider)
+    return index, provider
 
-credentials_error = ""
 
-if settings and settings.provider == "openai" and not settings.openai_api_key:
-    deployed_api_key = get_streamlit_secret("OPENAI_API_KEY", "openai_api_key")
-    if deployed_api_key:
-        settings = replace(settings, openai_api_key=deployed_api_key)
+settings = Settings.from_env()
+pdf_paths = discover_pdfs()
+available_names = {path.name for path in pdf_paths}
+missing_documents = [name for name in EXPECTED_PDFS if name not in available_names]
 
 with st.sidebar:
-    st.subheader("Base de conocimiento", help="Manuales utilizados por el asistente RAG.")
-    st.caption(f"Carpeta: {DATA_DIR}")
-
-    if settings and settings.provider == "openai" and not settings.openai_api_key:
-        session_api_key = st.text_input(
-            "Clave de OpenAI para esta sesión",
-            type="password",
-            key="openai_api_key_session",
-            icon=":material/key:",
-            placeholder="sk-...",
-            help=(
-                "La clave permanece solamente en esta sesión del navegador; "
-                "no se escribe en el proyecto ni se envía a Git."
-            ),
-            persist_state="session",
-        )
-        if session_api_key and session_api_key.strip():
-            settings = replace(
-                settings,
-                openai_api_key=session_api_key.strip(),
-            )
-
-    if settings:
-        try:
-            settings.validate_credentials()
-        except ValueError as exc:
-            credentials_error = str(exc)
-
-    uploaded_files = []
-    if settings and settings.allow_pdf_upload:
-        uploaded_files = st.file_uploader(
-            "Cargar manuales PDF",
-            type=["pdf"],
-            accept_multiple_files=True,
-            help="También puede copiar los archivos directamente dentro de data/.",
-        )
-        if st.button(
-            "Guardar PDF cargados",
-            icon=":material/upload_file:",
-            width="stretch",
-            disabled=not uploaded_files,
-        ):
-            save_uploads(uploaded_files)
-            st.toast("Archivos guardados en data/.", icon=":material/check_circle:")
-
-    pdf_paths = discover_pdfs()
+    st.subheader("Base de conocimiento")
     for expected_name in EXPECTED_PDFS:
-        icon = "✓" if (DATA_DIR / expected_name).exists() else "○"
-        st.write(f"{icon} {expected_name}")
+        if expected_name in available_names:
+            st.write(f":material/check_circle: {expected_name}")
+        else:
+            st.write(f":material/error: {expected_name}")
+    st.divider()
+    st.caption(f"Modelo: {settings.chat_model}")
+    st.caption("Procesamiento automático · sin API Key")
 
-    if settings:
-        st.write(f"**Proveedor:** {settings.provider}")
-        st.write(f"**Modelo:** {settings.chat_model}")
-    if settings_error:
-        st.error(settings_error)
-    if credentials_error:
-        st.warning(credentials_error, icon=":material/key:")
-
-    can_process = bool(settings and not settings_error and not credentials_error)
-    process_clicked = st.button(
-        "Procesar documentos",
-        type="primary",
-        icon=":material/database:",
-        width="stretch",
-        disabled=not can_process,
+if missing_documents:
+    st.error(
+        "La instalación del servidor está incompleta. Faltan los manuales: "
+        + ", ".join(missing_documents)
     )
+    st.stop()
 
-st.subheader("Asistente de manuales")
-st.caption("Las respuestas se generan con fragmentos recuperados y muestran archivo y página.")
+try:
+    with st.status(
+        "Preparando la base de conocimiento...",
+        expanded=True,
+    ) as runtime_status:
+        rag_index, provider = load_rag_runtime(
+            settings,
+            document_signature(pdf_paths),
+        )
+        runtime_status.update(
+            label="Base de conocimiento disponible",
+            state="complete",
+            expanded=False,
+        )
+except Exception as exc:
+    logger.exception("No se pudo inicializar el entorno RAG")
+    st.error(friendly_index_error(exc))
+    st.caption("El administrador del servidor debe revisar los registros de la aplicación.")
+    st.stop()
+
+st.subheader("Asistente")
+st.caption("Escribe tu consulta en el campo inferior.")
 
 st.session_state.setdefault("messages", [])
-
-if process_clicked:
-    try:
-        provider = create_provider(settings)
-        progress_bar = st.progress(0.0, text="Preparando documentos...")
-
-        def report(value: float, message: str) -> None:
-            progress_bar.progress(value, text=message)
-
-        st.session_state.rag_index = build_or_load_index(
-            discover_pdfs(), settings, provider, report
-        )
-        st.session_state.provider = provider
-        progress_bar.empty()
-        st.success(
-            "Base de conocimiento lista para responder.",
-            icon=":material/check_circle:",
-        )
-    except Exception as exc:
-        st.error(f"No se pudo procesar la base: {exc}")
-
-if not pdf_paths:
-    st.info(
-        "Deposite los dos PDF dentro de la carpeta `data/` o cárguelos desde el panel lateral."
-    )
-elif "rag_index" not in st.session_state:
-    st.info("Pulse **Procesar documentos** para crear o cargar el índice RAG.")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if message.get("sources"):
-            with st.expander("Fuentes consultadas"):
-                for source in message["sources"]:
-                    st.markdown(
-                        f"**[F{source['number']}] {source['file']} — página "
-                        f"{source['page']}** · similitud {source['score']:.3f}"
-                    )
-                    st.caption(source["text"])
 
-ready = "rag_index" in st.session_state and "provider" in st.session_state
 question = st.chat_input(
-    "Ejemplo: ¿Qué debo hacer durante mi primer día?",
-    disabled=False,
+    "Escribe tu pregunta",
     submit_mode="disable",
 )
+
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
-    if not ready:
-        if settings_error:
-            guidance = f"Revise la configuración de la aplicación: {settings_error}"
-        elif credentials_error:
-            guidance = (
-                "Configure la clave de OpenAI en los secretos del despliegue o "
-                "en el campo de contraseña del panel lateral."
-            )
-        elif not pdf_paths:
-            guidance = (
-                "Aún no hay documentos PDF disponibles. Cargue los manuales desde "
-                "el panel lateral o móntelos en la carpeta `data/` del servidor."
-            )
-        else:
-            guidance = (
-                "La base todavía no fue indexada. Pulse **Procesar documentos** "
-                "y, cuando termine, vuelva a enviar la pregunta."
-            )
-        with st.chat_message("assistant"):
-            st.info(guidance, icon=":material/info:")
-        st.session_state.messages.append(
-            {"role": "assistant", "content": guidance}
-        )
-    else:
-        with st.chat_message("assistant"):
-            try:
-                with st.spinner("Buscando en los manuales..."):
-                    response, results = answer_question(
-                        question,
-                        st.session_state.rag_index,
-                        st.session_state.provider,
-                        settings.top_k,
-                    )
-                st.markdown(response)
-                sources = [
-                    {
-                        "number": number,
-                        "file": result.chunk.source,
-                        "page": result.chunk.page,
-                        "score": result.score,
-                        "text": result.chunk.text,
-                    }
-                    for number, result in enumerate(results, start=1)
-                ]
-                with st.expander("Fuentes consultadas"):
-                    for source in sources:
-                        st.markdown(
-                            f"**[F{source['number']}] {source['file']} — página "
-                            f"{source['page']}** · similitud {source['score']:.3f}"
-                        )
-                        st.caption(source["text"])
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": response, "sources": sources}
+    with st.chat_message("assistant"):
+        try:
+            with st.spinner("Consultando los manuales..."):
+                response = answer_question(
+                    question,
+                    rag_index,
+                    provider,
+                    settings.top_k,
+                    settings.min_similarity,
                 )
-            except Exception as exc:
-                st.error(f"No se pudo responder: {exc}")
+            st.markdown(response)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": response}
+            )
+        except Exception:
+            logger.exception("No se pudo responder la pregunta")
+            response = "No pude completar la consulta. Inténtalo nuevamente en unos segundos."
+            st.error(response)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": response}
+            )

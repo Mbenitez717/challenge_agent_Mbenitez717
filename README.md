@@ -1,8 +1,9 @@
 # Asistente RAG — Santos Pegasus Soluciones
 
-Prototipo de un asistente de inteligencia artificial que responde preguntas sobre
-manuales internos en PDF, indica el archivo y la página utilizados y puede ejecutarse
-localmente o en una instancia de Oracle Cloud Infrastructure (OCI).
+Prototipo de un asistente de inteligencia artificial que responde preguntas usando
+manuales internos en PDF. Funciona con modelos locales, no requiere API Key ni
+servicios de inteligencia artificial pagos y puede ejecutarse localmente o en Oracle
+Cloud Infrastructure (OCI).
 
 ## Sobre la empresa
 
@@ -12,232 +13,251 @@ Inteligencia Artificial (RAG). Se destaca por sus rigurosos estándares técnico
 ingeniería back-end y front-end, garantizando excelencia operativa y seguridad en
 infraestructuras de nube (OCI).
 
-## Objetivos
+## Objetivos del proyecto
 
 - Procesar `Manual_Onboarding.pdf` y `Manual_de_Respuestas_Incidentes.pdf`.
-- Recuperar los fragmentos más relacionados con cada pregunta.
-- Generar respuestas claras basadas solamente en los manuales.
-- Mostrar trazabilidad mediante archivo, página, fragmento y puntuación de similitud.
-- Ofrecer una interfaz sobria y sencilla para usuarios no técnicos.
-- Ejecutarse primero en local y luego desplegarse en OCI Compute mediante Docker.
+- Extraer y fragmentar automáticamente el contenido de los documentos.
+- Crear embeddings y recuperar los fragmentos más relacionados con cada consulta.
+- Generar respuestas claras basadas exclusivamente en los manuales.
+- Evitar claves de API y llamadas facturables mediante modelos ejecutados con Ollama.
+- Entregar una interfaz sobria donde el usuario solamente escribe su pregunta.
+- Funcionar primero de forma local y después desplegarse en OCI Compute con Docker.
+
+## Experiencia del usuario
+
+La preparación de la base de conocimiento es una tarea del servidor. El usuario final
+no carga archivos, no pulsa botones de indexación y no configura modelos. Cuando la URL
+está disponible, solo debe:
+
+1. Abrir la aplicación.
+2. Escribir una pregunta en el chat.
+3. Leer la respuesta generada a partir de los manuales.
+
+La interfaz no muestra fragmentos recuperados, nombres de archivos, páginas ni
+puntuaciones de similitud. Esa información se utiliza únicamente dentro del proceso RAG.
+
+El agente aplica dos controles de alcance: un umbral de similitud semántica descarta
+consultas claramente ajenas y una respuesta estructurada de Gemma verifica que el
+contexto contenga información suficiente. Ante información ausente, ambigua o fuera del
+ámbito documental, responde que no encontró información y no utiliza conocimiento general.
 
 ## Arquitectura
 
 ```mermaid
 flowchart LR
-    U["Usuario"] --> UI["Interfaz Streamlit"]
+    U["Usuario final"] --> UI["Streamlit"]
     UI --> Q["Pregunta"]
-    PDF["Manuales PDF"] --> P["PyPDF: extracción por página"]
+
+    PDF["Manuales PDF"] --> P["PyPDF"]
     P --> C["Fragmentación con solapamiento"]
-    C --> E["Modelo de embeddings"]
-    E --> IDX["Índice vectorial NumPy"]
-    Q --> QE["Embedding de la pregunta"]
+    C --> EM["Nomic Embed Text en Ollama"]
+    EM --> IDX["Índice vectorial NumPy"]
+
+    Q --> QE["Embedding de la consulta"]
     QE --> IDX
-    IDX --> K["Top K fragmentos y páginas"]
-    K --> LLM["Modelo de lenguaje"]
+    IDX --> R["Fragmentos relevantes"]
+    R --> LLM["Gemma 3 4B en Ollama"]
     LLM --> UI
+
+    B["Bootstrap del servidor"] --> O["Espera Ollama y modelos"]
+    O --> IDX
+    IDX --> S["Publica Streamlit"]
 ```
 
-El prototipo evita una base vectorial externa para reducir la complejidad inicial.
-Guarda el índice en `data/index_*.npz` y sus metadatos en `data/index_*.json`. Si un
-PDF o la configuración de embeddings cambia, crea automáticamente otro índice.
+El índice se guarda en `data/index_*.npz` y sus metadatos en
+`data/index_*.json`. Si cambia un PDF, el modelo de embeddings o la configuración de
+fragmentación, la aplicación genera automáticamente un índice nuevo.
 
-## Tecnologías
+## Tecnologías utilizadas
 
-- Python 3.11 o 3.12
-- Streamlit para la interfaz gráfica
-- PyPDF para extraer texto por página
-- NumPy para búsqueda vectorial por similitud coseno
-- OpenAI Responses API y embeddings, o alternativamente Ollama
-- Docker y Docker Compose
-- OCI Compute para el despliegue
+- **Python 3.12**: lenguaje principal.
+- **Streamlit 1.57+**: interfaz web del asistente.
+- **PyPDF**: extracción de texto por página.
+- **NumPy**: índice vectorial y similitud coseno.
+- **Ollama**: ejecución local de modelos sin credenciales externas.
+- **Gemma 3 4B**: modelo generativo para redactar respuestas.
+- **Nomic Embed Text**: modelo de embeddings para recuperación semántica.
+- **Salida estructurada de Ollama**: validación estricta de respuestas sustentadas.
+- **Docker y Docker Compose**: ejecución reproducible y arranque automático.
+- **OCI Compute**: infraestructura prevista para el despliegue público.
 
-## Estructura
+## Estructura del repositorio
 
 ```text
 .
-├── app.py                      # Interfaz Streamlit
+├── app.py                         # Interfaz y flujo de conversación
 ├── src/
-│   ├── config.py               # Configuración y rutas
-│   ├── providers.py            # Proveedores OpenAI/Ollama
-│   └── rag.py                  # Extracción, indexación, búsqueda y respuesta
-├── data/                       # Deposite aquí los PDF (no se suben a Git)
-├── tests/test_rag.py           # Pruebas unitarias
-├── docs/DEPLOY_OCI.md          # Despliegue explicado paso a paso
-├── .streamlit/config.toml      # Tema visual y servidor
-├── .env.example                # Variables necesarias, sin secretos
+│   ├── config.py                  # Variables, modelos y rutas
+│   ├── providers.py               # Integración con la API local de Ollama
+│   └── rag.py                     # PDF, fragmentación, índice y recuperación
+├── scripts/
+│   ├── bootstrap.py               # Prepara modelos e índice antes de publicar
+│   └── preparar_ollama.ps1        # Preparación inicial de Ollama en Windows
+├── data/                          # Manuales e índice local, excluidos de Git
+├── tests/test_rag.py              # Pruebas unitarias del núcleo RAG
+├── docs/
+│   ├── DEPLOY_OCI.md              # Despliegue paso a paso
+│   ├── EVIDENCIA_OCI.md           # Plantilla de verificación final
+│   └── evidencias/                # Captura real del despliegue
+├── .streamlit/config.toml         # Tema visual y configuración del servidor
+├── .env.example                   # Configuración sin credenciales
 ├── Dockerfile
 ├── docker-compose.yml
-└── requirements.txt
+├── requirements.txt
+└── README.md
 ```
 
 ## 1. Preparación local en Windows
+
+Los siguientes pasos corresponden al administrador o desarrollador. El usuario final
+solo accede a la URL.
 
 ### 1.1 Instalar herramientas
 
 Instale:
 
-1. [Python 3.12](https://www.python.org/downloads/) y marque **Add Python to PATH**.
+1. [Python 3.12](https://www.python.org/downloads/) con **Add Python to PATH**.
 2. [Git](https://git-scm.com/downloads).
-3. Opcional: [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/).
+3. [Ollama para Windows](https://docs.ollama.com/windows).
+4. Opcionalmente, [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/).
 
-Abra PowerShell dentro de la carpeta del proyecto y compruebe:
+### 1.2 Crear el entorno e instalar dependencias
 
-```powershell
-python --version
-git --version
-```
-
-### 1.2 Crear el entorno virtual
+Desde PowerShell, dentro de la carpeta del proyecto:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+& ".\.venv\Scripts\python.exe" -m pip install --upgrade pip
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
-Si PowerShell bloquea la activación, ejecute una vez en esa ventana:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
+No es necesario ejecutar `Activate.ps1`.
 
 ### 1.3 Depositar los documentos
 
-Copie los archivos en la carpeta **`data/`** del proyecto. Las rutas finales deben
-ser exactamente:
+Copie los archivos con estos nombres exactos:
 
 ```text
 data/Manual_Onboarding.pdf
 data/Manual_de_Respuestas_Incidentes.pdf
 ```
 
-También puede cargarlos desde el panel lateral de la aplicación. Los PDF y el índice
-están en `.gitignore` para evitar publicar información interna por accidente.
+Los PDF no se cargan desde la interfaz y están excluidos de Git. PyPDF no realiza OCR;
+si un documento contiene únicamente imágenes escaneadas, aplique OCR previamente.
 
-> PyPDF extrae texto, pero no hace OCR. Si un PDF contiene solamente imágenes
-> escaneadas, aplique OCR antes de utilizarlo.
+### 1.4 Preparar Ollama
 
-### 1.4 Configurar OpenAI
-
-1. Cree una clave en [OpenAI API keys](https://platform.openai.com/api-keys).
-2. Copie el ejemplo de configuración:
-
-```powershell
-Copy-Item .env.example .env
-notepad .env
-```
-
-3. Complete solamente esta línea, sin comillas:
-
-```dotenv
-OPENAI_API_KEY=su_clave_aqui
-```
-
-El modelo de respuesta predeterminado es `gpt-5.6-luna`, elegido para un prototipo
-de volumen moderado. Se usa la Responses API, recomendada actualmente por OpenAI
-para aplicaciones nuevas. Puede cambiar el modelo desde `.env`. Consulte la
-[guía oficial de modelos](https://developers.openai.com/api/docs/guides/latest-model)
-y la [guía oficial de embeddings](https://developers.openai.com/api/docs/guides/embeddings).
-
-La API de ChatGPT/OpenAI se factura por uso y no forma parte automáticamente de una
-suscripción de ChatGPT. Nunca suba `.env` a Git.
-
-### 1.5 Ejecutar
-
-```powershell
-python -m streamlit run app.py
-```
-
-Abra [http://localhost:8501](http://localhost:8501), confirme que aparecen los dos
-manuales y pulse **Procesar documentos**. La primera indexación llama al modelo de
-embeddings; las siguientes ejecuciones reutilizan el índice guardado.
-
-### 1.6 Probar
-
-Ejemplos de preguntas:
-
-- ¿Cuál es el proceso de onboarding durante el primer día?
-- Resume las responsabilidades de una persona recién incorporada.
-- ¿Qué pasos debo seguir ante un incidente crítico?
-- ¿Cómo y cuándo se escala un incidente?
-- ¿En qué manual y página se explica el cierre de un incidente?
-
-Una respuesta válida debe citar `[F1]`, `[F2]`, etc. y el desplegable **Fuentes
-consultadas** debe mostrar el manual y la página. Pruebe además una pregunta ajena a
-los documentos: el asistente debe reconocer que no encontró la información.
-
-### 1.7 Ejecutar pruebas
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-## 2. Alternativa sin API: Ollama
-
-Instale [Ollama](https://ollama.com/download), descargue los modelos y modifique
-`.env`:
+Abra Ollama y ejecute:
 
 ```powershell
 ollama pull gemma3:4b
 ollama pull nomic-embed-text
 ```
 
-```dotenv
-RAG_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_CHAT_MODEL=gemma3:4b
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+También puede usar el script de preparación administrativa:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\preparar_ollama.ps1
 ```
 
-Ollama no envía el contenido a OpenAI, pero requiere más memoria y CPU. Para el
-primer despliegue económico en OCI se recomienda comenzar con el proveedor OpenAI.
+Copie la configuración base:
 
-## 3. Ejecutar con Docker
+```powershell
+Copy-Item .env.example .env -Force
+```
+
+La aplicación se comunica con Ollama en `http://localhost:11434`. Los documentos y
+las preguntas no se envían a un proveedor de modelos externo.
+
+### 1.5 Iniciar la aplicación
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m streamlit run app.py
+```
+
+Abra [http://localhost:8501](http://localhost:8501). Si todavía no existe un índice,
+la aplicación lo crea automáticamente. Las siguientes ejecuciones reutilizan el índice
+persistido.
+
+## 2. Ejemplos de uso
+
+- ¿Cuál es el proceso de onboarding durante el primer día?
+- Resume las responsabilidades de una persona recién incorporada.
+- ¿Qué pasos debo seguir ante un incidente crítico?
+- ¿Cuándo debe escalarse la severidad de un incidente?
+- ¿Cómo se realiza el cierre de un incidente?
+- ¿Cuál es la cotización actual de una moneda? — debe indicar que no está en los manuales.
+
+## 3. Ejecutar pruebas
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m unittest discover -s tests -v
+```
+
+## 4. Funcionamiento sin servicios de IA pagos
+
+Ollama ejecuta Gemma 3 y Nomic Embed Text en la misma computadora o servidor. No se
+utilizan SDK de proveedores pagos, claves de API ni endpoints facturables. El único
+costo posible corresponde al equipo o infraestructura donde se ejecute la aplicación.
+
+## 5. Ejecución automatizada con Docker
 
 Con Docker Desktop iniciado:
 
 ```powershell
-docker compose up --build
+docker compose up -d --build
 ```
 
-La carpeta `data/` se monta como volumen, por lo que los documentos y el índice
-persisten al reconstruir el contenedor. Para detenerlo:
+El flujo de arranque realiza automáticamente estas tareas:
+
+1. Inicia Ollama.
+2. Espera a que el servicio esté saludable.
+3. Descarga los modelos que falten.
+4. Procesa los PDF y crea o carga el índice.
+5. Publica Streamlit en el puerto 8501.
+
+No es necesario ejecutar scripts manuales para cada usuario. Los contenedores tienen
+`restart: unless-stopped`, por lo que vuelven a iniciarse junto con Docker.
+
+Para revisar el estado:
 
 ```powershell
-docker compose down
+docker compose ps
+docker compose logs -f
 ```
 
-## 4. Despliegue en OCI
+## 6. Despliegue en OCI
 
-Siga [docs/DEPLOY_OCI.md](docs/DEPLOY_OCI.md). El resultado inicial será accesible en:
+La guía completa está en [docs/DEPLOY_OCI.md](docs/DEPLOY_OCI.md). Una vez desplegada,
+la dirección inicial será:
 
 ```text
 http://IP_PUBLICA_DE_OCI:8501
 ```
 
-Para producción, coloque HTTPS y autenticación delante de Streamlit. Este prototipo
-no incluye inicio de sesión; no publique manuales confidenciales hasta implementar
-un control de acceso.
+Antes de un uso productivo se recomienda colocar Nginx, HTTPS y autenticación delante
+de Streamlit, además de restringir SSH, configurar alertas de presupuesto y aplicar
+mínimo privilegio en OCI.
 
-## Seguridad y límites del prototipo
+## Seguridad y límites
 
-- Las claves se leen desde variables de entorno y no se guardan en el código.
-- Los PDF, `.env` e índices están excluidos de Git.
-- En OCI, configure `ALLOW_PDF_UPLOAD=false` para impedir que visitantes sustituyan
-  los manuales.
-- El prompt trata el contenido recuperado como datos no confiables y solicita ignorar
-  instrucciones maliciosas dentro de los PDF.
-- Las citas ayudan a auditar respuestas, pero una persona debe validar decisiones
-  críticas.
-- Para producción se recomienda autenticación, HTTPS, OCI Vault, observabilidad,
-  copias de seguridad y evaluaciones RAG con preguntas/respuestas esperadas.
+- `.env`, los PDF y los índices generados están excluidos del repositorio.
+- La interfaz no permite cargar o sustituir documentos.
+- El prompt trata el contenido recuperado como datos y rechaza instrucciones incluidas
+  dentro de los manuales que intenten modificar el comportamiento del asistente.
+- El modelo debe reconocer cuando una respuesta no se encuentra en la base documental.
+- Las decisiones críticas deben ser validadas por una persona responsable.
+- El prototipo público debe incorporar autenticación antes de usar documentos sensibles.
 
 ## Evidencia del despliegue
 
-Cuando OCI esté operativo, complete `docs/EVIDENCIA_OCI.md`, agregue una captura en
-`docs/evidencias/app-oci.png` y registre al menos tres preguntas de prueba. No se
-incluye una captura ficticia: la evidencia debe mostrar la URL o IP pública real.
+Después del despliegue real en OCI:
 
+1. Abra la URL pública y confirme que el chat esté disponible.
+2. Ejecute al menos tres preguntas de prueba.
+3. Registre los resultados en `docs/EVIDENCIA_OCI.md`.
+4. Guarde una captura real como `docs/evidencias/app-oci.png`.
+5. Incluya la URL pública o IP de OCI en la evidencia.
+
+No se debe incluir una captura ficticia: la evidencia final debe corresponder a la
+aplicación ejecutándose realmente en OCI.
