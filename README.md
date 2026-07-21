@@ -41,6 +41,11 @@ consultas claramente ajenas y una respuesta estructurada de Gemma verifica que e
 contexto contenga información suficiente. Ante información ausente, ambigua o fuera del
 ámbito documental, responde que no encontró información y no utiliza conocimiento general.
 
+Una capa conversacional local reconoce saludos, agradecimientos y despedidas para ofrecer
+un trato más natural y cordial. Estas expresiones no se envían al índice ni al modelo; si
+un saludo viene acompañado de una pregunta documental, la consulta continúa normalmente
+por el flujo RAG.
+
 ## Arquitectura
 
 ```mermaid

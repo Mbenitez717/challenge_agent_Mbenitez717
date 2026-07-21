@@ -1,13 +1,40 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 import logging
 from pathlib import Path
 
 import streamlit as st
 
-from src.config import EXPECTED_PDFS, Settings
-from src.providers import AIProvider, create_provider
-from src.rag import VectorIndex, answer_question, build_or_load_index, discover_pdfs
+from src import config as config_module
+from src import providers as providers_module
+from src import rag as rag_module
+
+
+# Streamlit puede conservar módulos importados cuando solo recarga app.py. Si el
+# contrato interno cambió durante desarrollo, actualizamos el backend una sola vez.
+backend_is_stale = (
+    getattr(config_module, "BACKEND_SCHEMA_VERSION", 0) != 3
+    or not hasattr(config_module.Settings, "min_similarity")
+    or not hasattr(providers_module, "GROUNDED_RESPONSE_SCHEMA")
+    or "min_similarity"
+    not in inspect.signature(rag_module.answer_question).parameters
+)
+if backend_is_stale:
+    importlib.invalidate_caches()
+    config_module = importlib.reload(config_module)
+    providers_module = importlib.reload(providers_module)
+    rag_module = importlib.reload(rag_module)
+
+EXPECTED_PDFS = config_module.EXPECTED_PDFS
+Settings = config_module.Settings
+AIProvider = providers_module.AIProvider
+create_provider = providers_module.create_provider
+VectorIndex = rag_module.VectorIndex
+answer_question = rag_module.answer_question
+build_or_load_index = rag_module.build_or_load_index
+discover_pdfs = rag_module.discover_pdfs
 
 
 logging.basicConfig(level=logging.INFO)
